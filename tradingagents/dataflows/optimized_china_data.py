@@ -5,6 +5,7 @@
 """
 
 import os
+import re
 import time
 import random
 from datetime import datetime, timedelta
@@ -19,14 +20,38 @@ logger = get_logger('agents')
 
 class OptimizedChinaDataProvider:
     """优化的A股数据提供器 - 集成缓存和Tushare数据接口"""
-    
+
     def __init__(self):
         self.cache = get_cache()
         self.config = get_config()
         self.last_api_call = 0
         self.min_api_interval = 0.5  # Tushare数据接口调用间隔较短
-        
+
         logger.info(f"📊 优化A股数据提供器初始化完成")
+
+    @staticmethod
+    def _safe_float(value: Any) -> Optional[float]:
+        """将带有单位或百分号的指标值转换为浮点数"""
+
+        if value is None:
+            return None
+
+        if isinstance(value, (int, float)):
+            return float(value)
+
+        value_str = str(value).strip()
+        if not value_str or value_str.lower() in {"nan", "--", "null"}:
+            return None
+
+        value_str = value_str.replace(",", "")
+        match = re.search(r"-?\d+(?:\.\d+)?", value_str)
+        if not match:
+            return None
+
+        try:
+            return float(match.group())
+        except ValueError:
+            return None
     
     def _wait_for_rate_limit(self):
         """等待API限制"""
@@ -576,118 +601,73 @@ class OptimizedChinaDataProvider:
             metrics = {}
             
             # 获取ROE - 直接从指标中获取
-            roe_value = indicators_dict.get('净资产收益率(ROE)')
-            if roe_value is not None and str(roe_value) != 'nan' and roe_value != '--':
-                try:
-                    roe_val = float(roe_value)
-                    # ROE通常是百分比形式
-                    metrics["roe"] = f"{roe_val:.1f}%"
-                    logger.debug(f"✅ 获取ROE: {metrics['roe']}")
-                except (ValueError, TypeError):
-                    metrics["roe"] = "N/A"
+            roe_val = self._safe_float(indicators_dict.get('净资产收益率(ROE)'))
+            if roe_val is None:
+                roe_val = self._safe_float(indicators_dict.get('净资产收益率'))
+            if roe_val is not None:
+                metrics["roe"] = f"{roe_val:.1f}%"
+                logger.debug(f"✅ 获取ROE: {metrics['roe']}")
             else:
                 metrics["roe"] = "N/A"
-            
+
             # 获取每股收益 - 用于计算PE
-            eps_value = indicators_dict.get('基本每股收益')
-            if eps_value is not None and str(eps_value) != 'nan' and eps_value != '--':
-                try:
-                    eps_val = float(eps_value)
-                    if eps_val > 0:
-                        # 计算PE = 股价 / 每股收益
-                        pe_val = price_value / eps_val
-                        metrics["pe"] = f"{pe_val:.1f}倍"
-                        logger.debug(f"✅ 计算PE: 股价{price_value} / EPS{eps_val} = {metrics['pe']}")
-                    else:
-                        metrics["pe"] = "N/A（亏损）"
-                except (ValueError, TypeError):
-                    metrics["pe"] = "N/A"
+            eps_val = self._safe_float(indicators_dict.get('基本每股收益'))
+            if eps_val is None:
+                eps_val = self._safe_float(indicators_dict.get('基本每股收益(TTM)'))
+            if eps_val is None:
+                eps_val = self._safe_float(indicators_dict.get('稀释每股收益'))
+            if eps_val is not None:
+                if eps_val > 0:
+                    pe_val = price_value / eps_val
+                    metrics["pe"] = f"{pe_val:.1f}倍"
+                    logger.debug(f"✅ 计算PE: 股价{price_value} / EPS{eps_val} = {metrics['pe']}")
+                else:
+                    metrics["pe"] = "N/A（亏损）"
             else:
-                metrics["pe"] = "N/A"
-            
+                pe_indicator = self._safe_float(indicators_dict.get('市盈率(TTM)'))
+                if pe_indicator is None:
+                    pe_indicator = self._safe_float(indicators_dict.get('市盈率'))
+                if pe_indicator is not None and pe_indicator > 0:
+                    metrics["pe"] = f"{pe_indicator:.1f}倍"
+                    logger.debug(f"✅ 使用AKShare直接市盈率指标: {metrics['pe']}")
+                else:
+                    metrics["pe"] = "N/A"
+
             # 获取每股净资产 - 用于计算PB
-            bps_value = indicators_dict.get('每股净资产_最新股数')
-            if bps_value is not None and str(bps_value) != 'nan' and bps_value != '--':
-                try:
-                    bps_val = float(bps_value)
-                    if bps_val > 0:
-                        # 计算PB = 股价 / 每股净资产
-                        pb_val = price_value / bps_val
-                        metrics["pb"] = f"{pb_val:.2f}倍"
-                        logger.debug(f"✅ 计算PB: 股价{price_value} / BPS{bps_val} = {metrics['pb']}")
-                    else:
-                        metrics["pb"] = "N/A"
-                except (ValueError, TypeError):
-                    metrics["pb"] = "N/A"
+            bps_val = self._safe_float(indicators_dict.get('每股净资产_最新股数'))
+            if bps_val is None:
+                bps_val = self._safe_float(indicators_dict.get('每股净资产'))
+            if bps_val is not None and bps_val > 0:
+                pb_val = price_value / bps_val
+                metrics["pb"] = f"{pb_val:.2f}倍"
+                logger.debug(f"✅ 计算PB: 股价{price_value} / BPS{bps_val} = {metrics['pb']}")
             else:
                 metrics["pb"] = "N/A"
-            
+
             # 尝试获取其他指标
             # 总资产收益率(ROA)
-            roa_value = indicators_dict.get('总资产报酬率')
-            if roa_value is not None and str(roa_value) != 'nan' and roa_value != '--':
-                try:
-                    roa_val = float(roa_value)
-                    metrics["roa"] = f"{roa_val:.1f}%"
-                except (ValueError, TypeError):
-                    metrics["roa"] = "N/A"
-            else:
-                metrics["roa"] = "N/A"
-            
+            roa_val = self._safe_float(indicators_dict.get('总资产报酬率'))
+            metrics["roa"] = f"{roa_val:.1f}%" if roa_val is not None else "N/A"
+
             # 毛利率
-            gross_margin_value = indicators_dict.get('毛利率')
-            if gross_margin_value is not None and str(gross_margin_value) != 'nan' and gross_margin_value != '--':
-                try:
-                    gross_margin_val = float(gross_margin_value)
-                    metrics["gross_margin"] = f"{gross_margin_val:.1f}%"
-                except (ValueError, TypeError):
-                    metrics["gross_margin"] = "N/A"
-            else:
-                metrics["gross_margin"] = "N/A"
-            
+            gross_margin_val = self._safe_float(indicators_dict.get('毛利率'))
+            metrics["gross_margin"] = f"{gross_margin_val:.1f}%" if gross_margin_val is not None else "N/A"
+
             # 销售净利率
-            net_margin_value = indicators_dict.get('销售净利率')
-            if net_margin_value is not None and str(net_margin_value) != 'nan' and net_margin_value != '--':
-                try:
-                    net_margin_val = float(net_margin_value)
-                    metrics["net_margin"] = f"{net_margin_val:.1f}%"
-                except (ValueError, TypeError):
-                    metrics["net_margin"] = "N/A"
-            else:
-                metrics["net_margin"] = "N/A"
-            
+            net_margin_val = self._safe_float(indicators_dict.get('销售净利率'))
+            metrics["net_margin"] = f"{net_margin_val:.1f}%" if net_margin_val is not None else "N/A"
+
             # 资产负债率
-            debt_ratio_value = indicators_dict.get('资产负债率')
-            if debt_ratio_value is not None and str(debt_ratio_value) != 'nan' and debt_ratio_value != '--':
-                try:
-                    debt_ratio_val = float(debt_ratio_value)
-                    metrics["debt_ratio"] = f"{debt_ratio_val:.1f}%"
-                except (ValueError, TypeError):
-                    metrics["debt_ratio"] = "N/A"
-            else:
-                metrics["debt_ratio"] = "N/A"
-            
+            debt_ratio_val = self._safe_float(indicators_dict.get('资产负债率'))
+            metrics["debt_ratio"] = f"{debt_ratio_val:.1f}%" if debt_ratio_val is not None else "N/A"
+
             # 流动比率
-            current_ratio_value = indicators_dict.get('流动比率')
-            if current_ratio_value is not None and str(current_ratio_value) != 'nan' and current_ratio_value != '--':
-                try:
-                    current_ratio_val = float(current_ratio_value)
-                    metrics["current_ratio"] = f"{current_ratio_val:.2f}"
-                except (ValueError, TypeError):
-                    metrics["current_ratio"] = "N/A"
-            else:
-                metrics["current_ratio"] = "N/A"
-            
+            current_ratio_val = self._safe_float(indicators_dict.get('流动比率'))
+            metrics["current_ratio"] = f"{current_ratio_val:.2f}" if current_ratio_val is not None else "N/A"
+
             # 速动比率
-            quick_ratio_value = indicators_dict.get('速动比率')
-            if quick_ratio_value is not None and str(quick_ratio_value) != 'nan' and quick_ratio_value != '--':
-                try:
-                    quick_ratio_val = float(quick_ratio_value)
-                    metrics["quick_ratio"] = f"{quick_ratio_val:.2f}"
-                except (ValueError, TypeError):
-                    metrics["quick_ratio"] = "N/A"
-            else:
-                metrics["quick_ratio"] = "N/A"
+            quick_ratio_val = self._safe_float(indicators_dict.get('速动比率'))
+            metrics["quick_ratio"] = f"{quick_ratio_val:.2f}" if quick_ratio_val is not None else "N/A"
             
             # 补充其他指标的默认值
             metrics.update({
