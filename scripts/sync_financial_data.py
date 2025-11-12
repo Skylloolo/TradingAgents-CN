@@ -26,6 +26,7 @@ sys.path.insert(0, str(project_root))
 from motor.motor_asyncio import AsyncIOMotorClient
 from app.core.config import settings
 from tradingagents.dataflows.providers.china.akshare import AKShareProvider
+from tradingagents.dataflows.utils.growth_rate import extract_growth_rate
 import logging
 
 # 配置日志
@@ -97,6 +98,16 @@ async def sync_single_stock_financial_data(
             "roa": _safe_float(latest.get('总资产净利率')),  # ROA
             "gross_margin": _safe_float(latest.get('销售毛利率')),  # 毛利率
             "netprofit_margin": _safe_float(latest.get('销售净利率')),  # 净利率
+            "netprofit_yoy": _safe_float(
+                latest.get('净利润同比增长率')
+                or latest.get('净利润增长率')
+                or latest.get('净利润同比增长')
+            ),
+            "epsg": _safe_float(
+                latest.get('基本每股收益同比增长率')
+                or latest.get('基本每股收益增长率')
+                or latest.get('每股收益同比增长率')
+            ),
 
             # 财务数据（万元）
             "revenue": _safe_float(latest.get('营业收入')),  # 营业收入（单期）
@@ -180,7 +191,18 @@ async def sync_single_stock_financial_data(
                     ps = market_cap / revenue_for_ps
                     financial_data['ps'] = round(ps, 2)
                     logger.info(f"   PS({ps_type}): {ps:.2f}")
-        
+
+                # 计算 PEG（市盈率相对于增长率）
+                growth_rate = extract_growth_rate(latest, financial_data)
+                if growth_rate:
+                    financial_data['growth_rate'] = growth_rate
+
+                pe_value = financial_data.get('pe')
+                if pe_value and growth_rate and growth_rate > 0:
+                    peg = round(pe_value / growth_rate, 2)
+                    financial_data['peg'] = peg
+                    logger.info(f"   PEG: {peg:.2f}")
+
         # 5. 更新 stock_basic_info 集合
         await db.stock_basic_info.update_one(
             {"code": code6},
@@ -195,6 +217,7 @@ async def sync_single_stock_financial_data(
                 "pe": financial_data.get('pe'),
                 "pb": financial_data.get('pb'),
                 "ps": financial_data.get('ps'),
+                "peg": financial_data.get('peg'),
                 "roe": financial_data.get('roe'),
                 "updated_at": datetime.utcnow()
             }},
@@ -223,10 +246,16 @@ def _safe_float(value) -> Optional[float]:
     if value is None or value == '' or str(value) == 'nan' or value == '--':
         return None
     try:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                return None
+            cleaned = cleaned.replace('%', '').replace('％', '')
+            cleaned = cleaned.replace(',', '')
+            return float(cleaned)
         return float(value)
     except (ValueError, TypeError):
         return None
-
 
 def _calculate_ttm_metric(df, metric_name: str) -> Optional[float]:
     """

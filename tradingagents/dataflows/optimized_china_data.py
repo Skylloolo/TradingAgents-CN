@@ -21,6 +21,7 @@ logger = get_logger('agents')
 
 # 导入 MongoDB 缓存适配器
 from .cache.mongodb_cache_adapter import get_mongodb_cache_adapter, get_stock_data_with_fallback, get_financial_data_with_fallback
+from tradingagents.dataflows.utils.growth_rate import extract_growth_rate
 
 
 class OptimizedChinaDataProvider:
@@ -493,6 +494,7 @@ class OptimizedChinaDataProvider:
 - **总市值**: {financial_estimates.get('total_mv', 'N/A')}
 - **市盈率(PE)**: {financial_estimates.get('pe', 'N/A')}
 - **市盈率TTM(PE_TTM)**: {financial_estimates.get('pe_ttm', 'N/A')}
+- **市盈增长比(PEG)**: {financial_estimates.get('peg', 'N/A')}
 - **市净率(PB)**: {financial_estimates.get('pb', 'N/A')}
 - **净资产收益率(ROE)**: {financial_estimates.get('roe', 'N/A')}
 - **资产负债率**: {financial_estimates.get('debt_ratio', 'N/A')}
@@ -526,6 +528,7 @@ class OptimizedChinaDataProvider:
 - **总市值**: {financial_estimates.get('total_mv', 'N/A')}
 - **市盈率(PE)**: {financial_estimates.get('pe', 'N/A')}
 - **市盈率TTM(PE_TTM)**: {financial_estimates.get('pe_ttm', 'N/A')}
+- **市盈增长比(PEG)**: {financial_estimates.get('peg', 'N/A')}
 - **市净率(PB)**: {financial_estimates.get('pb', 'N/A')}
 - **市销率(PS)**: {financial_estimates.get('ps', 'N/A')}
 - **股息收益率**: {financial_estimates.get('dividend_yield', 'N/A')}
@@ -585,6 +588,7 @@ class OptimizedChinaDataProvider:
 - **总市值**: {financial_estimates.get('total_mv', 'N/A')}
 - **市盈率(PE)**: {financial_estimates.get('pe', 'N/A')}
 - **市盈率TTM(PE_TTM)**: {financial_estimates.get('pe_ttm', 'N/A')}
+- **市盈增长比(PEG)**: {financial_estimates.get('peg', 'N/A')}
 - **市净率(PB)**: {financial_estimates.get('pb', 'N/A')}
 - **市销率(PS)**: {financial_estimates.get('ps', 'N/A')}
 - **股息收益率**: {financial_estimates.get('dividend_yield', 'N/A')}
@@ -964,6 +968,7 @@ class OptimizedChinaDataProvider:
             logger.debug(f"📊 [财务数据] 开始解析 MongoDB 财务数据，包含字段: {list(financial_data.keys())}")
 
             metrics = {}
+            pe_numeric = None
 
             # MongoDB 的 financial_data 是扁平化的结构，直接包含所有财务指标
             # 不再是嵌套的 {balance_sheet, income_statement, ...} 结构
@@ -1041,6 +1046,7 @@ class OptimizedChinaDataProvider:
             pe_value = None
             pe_ttm_value = None
             pb_value = None
+            pe_numeric = None
             is_loss_stock = False  # 🔥 标记是否为亏损股
 
             try:
@@ -1077,6 +1083,7 @@ class OptimizedChinaDataProvider:
                                 is_realtime = realtime_metrics.get('is_realtime', False)
                                 realtime_tag = " (实时)" if is_realtime else ""
                                 metrics["pe"] = f"{pe_value:.1f}倍{realtime_tag}"
+                                pe_numeric = float(pe_value)
 
                                 # 详细日志
                                 price = realtime_metrics.get('price', 'N/A')
@@ -1167,6 +1174,7 @@ class OptimizedChinaDataProvider:
                             if money_cap and money_cap > 0:
                                 pe_calculated = money_cap / net_profit
                                 metrics["pe"] = f"{pe_calculated:.1f}倍"
+                                pe_numeric = float(pe_calculated)
                                 logger.info(f"✅ [PE计算-第2层成功] PE={pe_calculated:.2f}倍")
                                 logger.info(f"   └─ 计算公式: 市值({money_cap}万元) / 净利润({net_profit}万元)")
                             else:
@@ -1180,6 +1188,7 @@ class OptimizedChinaDataProvider:
                                         # 🔥 只接受正数的 PE
                                         if pe_float > 0:
                                             metrics["pe"] = f"{pe_float:.1f}倍"
+                                            pe_numeric = pe_float
                                             logger.info(f"✅ [PE计算-第3层成功] 使用静态PE: {metrics['pe']}")
                                             logger.info(f"   └─ 数据来源: stock_basic_info.pe")
                                         else:
@@ -1209,6 +1218,7 @@ class OptimizedChinaDataProvider:
                                 # 🔥 只接受正数的 PE
                                 if pe_float > 0:
                                     metrics["pe"] = f"{pe_float:.1f}倍"
+                                    pe_numeric = pe_float
                                     logger.info(f"✅ [PE计算-第3层成功] 使用静态PE: {metrics['pe']}")
                                     logger.info(f"   └─ 数据来源: stock_basic_info.pe")
                                 else:
@@ -1323,6 +1333,13 @@ class OptimizedChinaDataProvider:
             else:
                 metrics["ps"] = "N/A"
 
+            growth_rate = extract_growth_rate(latest_indicators, financial_data)
+            if pe_numeric is not None and pe_numeric > 0 and growth_rate and growth_rate > 0:
+                peg_value = pe_numeric / growth_rate
+                metrics["peg"] = f"{peg_value:.2f}"
+            else:
+                metrics["peg"] = "N/A"
+
             # 股息收益率 - 暂时设为N/A，需要股息数据
             metrics["dividend_yield"] = "N/A"
             metrics["current_ratio"] = latest_indicators.get('current_ratio', 'N/A')
@@ -1427,6 +1444,7 @@ class OptimizedChinaDataProvider:
                                 realtime_tag = " (实时)" if is_realtime else ""
                                 metrics["pe"] = f"{pe_value:.1f}倍{realtime_tag}"
                                 logger.info(f"✅ [AKShare-PE计算-第1层成功] PE={pe_value:.2f}倍 | 来源={realtime_metrics.get('source')} | 实时={is_realtime}")
+                                pe_numeric = float(pe_value)
 
                             # 使用实时PE_TTM
                             pe_ttm_value = realtime_metrics.get('pe_ttm')
@@ -1523,6 +1541,7 @@ class OptimizedChinaDataProvider:
                 if eps_for_pe and eps_for_pe > 0:
                     pe_val = price_value / eps_for_pe
                     metrics["pe"] = f"{pe_val:.1f}倍"
+                    pe_numeric = float(pe_val)
                     logger.info(f"✅ [AKShare-PE计算-第2层成功] PE({pe_type}): 股价{price_value} / EPS{eps_for_pe:.4f} = {metrics['pe']}")
                 elif eps_for_pe and eps_for_pe <= 0:
                     metrics["pe"] = "N/A（亏损）"
@@ -1675,6 +1694,13 @@ class OptimizedChinaDataProvider:
             else:
                 metrics["ps"] = "N/A"
 
+            growth_rate = extract_growth_rate(indicators_dict, financial_data, stock_info)
+            if pe_numeric is not None and pe_numeric > 0 and growth_rate and growth_rate > 0:
+                peg_value = pe_numeric / growth_rate
+                metrics["peg"] = f"{peg_value:.2f}"
+            else:
+                metrics["peg"] = "N/A"
+
             # 补充其他指标的默认值
             metrics.update({
                 "dividend_yield": "待查询",
@@ -1730,6 +1756,7 @@ class OptimizedChinaDataProvider:
             # 需要使用 TTM 公式计算
             ttm_revenue = None
             ttm_net_income = None
+            raw_indicator_latest = None
 
             try:
                 if len(income_statement) >= 2:
@@ -1767,6 +1794,10 @@ class OptimizedChinaDataProvider:
             except Exception as e:
                 logger.warning(f"⚠️ Tushare TTM 计算失败: {e}")
 
+            raw_indicators = financial_data.get('raw_data', {}).get('financial_indicators') if isinstance(financial_data.get('raw_data'), dict) else None
+            if isinstance(raw_indicators, list) and raw_indicators:
+                raw_indicator_latest = raw_indicators[0]
+
             # 降级到单期数据
             total_revenue = ttm_revenue if ttm_revenue else (latest_income.get('total_revenue', 0) or 0)
             net_income = ttm_net_income if ttm_net_income else (latest_income.get('n_income', 0) or 0)
@@ -1796,6 +1827,7 @@ class OptimizedChinaDataProvider:
                 if net_income > 0:
                     pe_ratio = market_cap / (net_income * 10000)  # 转换单位
                     metrics["pe"] = f"{pe_ratio:.1f}倍"
+                    pe_numeric = float(pe_ratio)
                     logger.info(f"✅ Tushare 计算PE({profit_type}): 市值{market_cap/100000000:.2f}亿元 / 净利润{net_income:.2f}万元 = {pe_ratio:.1f}倍")
                 else:
                     metrics["pe"] = "N/A（亏损）"
@@ -1819,6 +1851,13 @@ class OptimizedChinaDataProvider:
                 metrics["pe"] = "N/A（无总股本数据）"
                 metrics["pb"] = "N/A（无总股本数据）"
                 metrics["ps"] = "N/A（无总股本数据）"
+
+            growth_rate = extract_growth_rate(financial_data, raw_indicator_latest, stock_info)
+            if pe_numeric is not None and pe_numeric > 0 and growth_rate and growth_rate > 0:
+                peg_value = pe_numeric / growth_rate
+                metrics["peg"] = f"{peg_value:.2f}"
+            else:
+                metrics["peg"] = "N/A"
 
             # ROE
             if total_equity > 0 and net_income > 0:
@@ -1875,6 +1914,30 @@ class OptimizedChinaDataProvider:
         except Exception as e:
             logger.error(f"解析财务数据失败: {e}")
             return None
+
+    @staticmethod
+    def _normalize_numeric_value(value) -> Optional[float]:
+        """将带有百分号或其他符号的值转换为浮点数"""
+        if value is None:
+            return None
+
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned or cleaned.lower() in {"nan", "--", "null"}:
+                return None
+            cleaned = cleaned.replace('%', '').replace('％', '')
+            cleaned = cleaned.replace(',', '')
+            try:
+                return float(cleaned)
+            except (ValueError, TypeError):
+                return None
+
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+
+        return None
 
     def _calculate_fundamental_score(self, metrics: dict, stock_info: dict) -> float:
         """计算基本面评分"""
