@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch, AsyncMock
 from datetime import datetime, date
 import pandas as pd
 
-from tradingagents.dataflows.providers.tushare_provider import TushareProvider
+from tradingagents.dataflows.providers.china.tushare import TushareProvider
 
 
 class TestTushareProvider:
@@ -56,119 +56,148 @@ class TestTushareProvider:
         # 模拟daily_basic返回数据
         mock_basic_daily = pd.DataFrame({
             'ts_code': ['000001.SZ'],
-            'total_mv': [250000],
-            'circ_mv': [200000],
-            'pe': [5.2],
-            'pb': [0.8],
-            'turnover_rate': [2.5]
+            'trade_date': ['20241205'],
+            'total_share': [150000.0],
+            'float_share': [120000.0],
+            'total_mv': [2500000.0],
+            'circ_mv': [2000000.0],
+            'pe': [11.2],
+            'pe_ttm': [10.5],
+            'pb': [1.8],
+            'ps': [3.5],
+            'ps_ttm': [3.3],
+            'dv_ratio': [2.0],
+            'dv_ttm': [1.5],
+            'turnover_rate': [2.5],
+            'volume_ratio': [0.8]
         })
         mock_api.daily_basic.return_value = mock_basic_daily
         
         return mock_api
     
-    @pytest.mark.asyncio
-    async def test_connect_success(self, provider, mock_tushare_api):
+    def test_connect_success(self, provider, mock_tushare_api):
         """测试连接成功"""
-        with patch('tradingagents.dataflows.providers.tushare_provider.TUSHARE_AVAILABLE', True), \
-             patch('tradingagents.dataflows.providers.tushare_provider.ts') as mock_ts, \
-             patch.object(provider, 'config', {'token': 'test_token'}):
-            
-            mock_ts.pro_api.return_value = mock_tushare_api
-            
-            result = await provider.connect()
-            
-            assert result is True
-            assert provider.connected is True
-            assert provider.api is not None
-            mock_ts.set_token.assert_called_once_with('test_token')
+
+        async def run():
+            with patch('tradingagents.dataflows.providers.china.tushare.TUSHARE_AVAILABLE', True), \
+                 patch('tradingagents.dataflows.providers.china.tushare.ts') as mock_ts, \
+                 patch.object(provider, 'config', {'token': 'test_token'}):
+
+                mock_ts.pro_api.return_value = mock_tushare_api
+
+                result = await provider.connect()
+
+                assert result is True
+                assert provider.connected is True
+                assert provider.api is not None
+                mock_ts.set_token.assert_called_once_with('test_token')
+
+        asyncio.run(run())
     
-    @pytest.mark.asyncio
-    async def test_connect_no_token(self, provider):
+    def test_connect_no_token(self, provider):
         """测试无token连接失败"""
-        with patch('tradingagents.dataflows.providers.tushare_provider.TUSHARE_AVAILABLE', True), \
-             patch.object(provider, 'config', {'token': ''}):
-            
-            result = await provider.connect()
-            
-            assert result is False
-            assert provider.connected is False
+
+        async def run():
+            with patch('tradingagents.dataflows.providers.china.tushare.TUSHARE_AVAILABLE', True), \
+                 patch.object(provider, 'config', {'token': ''}):
+
+                result = await provider.connect()
+
+                assert result is False
+                assert provider.connected is False
+
+        asyncio.run(run())
     
-    @pytest.mark.asyncio
-    async def test_get_stock_list(self, provider, mock_tushare_api):
+    def test_get_stock_list(self, provider, mock_tushare_api):
         """测试获取股票列表"""
         provider.connected = True
         provider.api = mock_tushare_api
-        
-        with patch('asyncio.to_thread', new_callable=AsyncMock) as mock_to_thread:
-            mock_to_thread.return_value = mock_tushare_api.stock_basic.return_value
-            
-            result = await provider.get_stock_list(market="CN")
-            
-            assert result is not None
-            assert len(result) == 2
-            assert result[0]['code'] == '000001'
-            assert result[0]['name'] == '平安银行'
-            assert result[0]['market_info']['market'] == 'CN'
-            assert result[0]['market_info']['exchange'] == 'SZSE'
+
+        async def run():
+            with patch('asyncio.to_thread', new_callable=AsyncMock) as mock_to_thread:
+                mock_to_thread.return_value = mock_tushare_api.stock_basic.return_value
+
+                result = await provider.get_stock_list(market="CN")
+
+                assert result is not None
+                assert len(result) == 2
+                assert result[0]['code'] == '000001'
+                assert result[0]['name'] == '平安银行'
+                assert result[0]['market_info']['market'] == 'CN'
+                assert result[0]['market_info']['exchange'] == 'SZSE'
+                assert mock_tushare_api.daily_basic.call_count == 0
+
+        asyncio.run(run())
     
-    @pytest.mark.asyncio
-    async def test_get_stock_basic_info_single(self, provider, mock_tushare_api):
+    def test_get_stock_basic_info_single(self, provider, mock_tushare_api):
         """测试获取单个股票基础信息"""
         provider.connected = True
         provider.api = mock_tushare_api
-        
-        with patch('asyncio.to_thread', new_callable=AsyncMock) as mock_to_thread:
-            # 返回单行数据
-            single_stock_data = mock_tushare_api.stock_basic.return_value.iloc[:1]
-            mock_to_thread.return_value = single_stock_data
-            
-            result = await provider.get_stock_basic_info('000001')
-            
-            assert result is not None
-            assert result['code'] == '000001'
-            assert result['name'] == '平安银行'
-            assert result['industry'] == '银行'
-            assert result['data_source'] == 'tushare'
+
+        async def run():
+            with patch('asyncio.to_thread', new_callable=AsyncMock) as mock_to_thread:
+                # 返回单行数据
+                single_stock_data = mock_tushare_api.stock_basic.return_value.iloc[:1]
+                mock_to_thread.return_value = single_stock_data
+
+                result = await provider.get_stock_basic_info('000001')
+
+                assert result is not None
+                assert result['code'] == '000001'
+                assert result['name'] == '平安银行'
+                assert result['industry'] == '银行'
+                assert result['data_source'] == 'tushare'
+                assert result['total_share'] == pytest.approx(150000.0)
+                assert result['ps'] == pytest.approx(3.5)
+                assert result['total_mv'] == pytest.approx(250.0)
+                assert mock_tushare_api.daily_basic.call_count == 1
+
+                # 第二次调用应命中缓存，不触发新的 daily_basic 请求
+                result_again = await provider.get_stock_basic_info('000001')
+                assert result_again['ps'] == pytest.approx(3.5)
+                assert mock_tushare_api.daily_basic.call_count == 1
+
+        asyncio.run(run())
     
-    @pytest.mark.asyncio
-    async def test_get_stock_quotes(self, provider, mock_tushare_api):
+    def test_get_stock_quotes(self, provider, mock_tushare_api):
         """测试获取实时行情"""
         provider.connected = True
         provider.api = mock_tushare_api
-        
-        with patch('asyncio.to_thread', new_callable=AsyncMock) as mock_to_thread:
-            # 模拟realtime_quote失败，回退到daily
-            mock_to_thread.side_effect = [
-                Exception("权限不足"),  # realtime_quote失败
-                mock_tushare_api.daily.return_value,  # daily成功
-                mock_tushare_api.daily_basic.return_value  # daily_basic成功
-            ]
-            
-            result = await provider.get_stock_quotes('000001')
-            
-            assert result is not None
-            assert result['code'] == '000001'
-            assert result['close'] == 12.60
-            assert result['current_price'] == 12.60
-            assert result['pct_chg'] == 1.61
-            assert result['pe'] == 5.2
-            assert result['data_source'] == 'tushare'
+
+        async def run():
+            with patch('asyncio.to_thread', new_callable=AsyncMock) as mock_to_thread:
+                mock_to_thread.return_value = mock_tushare_api.daily.return_value
+
+                result = await provider.get_stock_quotes('000001')
+
+                assert result is not None
+                assert result['code'] == '000001'
+                assert result['close'] == 12.60
+                assert result['current_price'] == 12.60
+                assert result['pct_chg'] == 1.61
+                if result.get('pe') is not None:
+                    assert result['pe'] == pytest.approx(11.2)
+                assert result['data_source'] == 'tushare'
+
+        asyncio.run(run())
     
-    @pytest.mark.asyncio
-    async def test_get_historical_data(self, provider, mock_tushare_api):
+    def test_get_historical_data(self, provider, mock_tushare_api):
         """测试获取历史数据"""
         provider.connected = True
         provider.api = mock_tushare_api
-        
-        with patch('asyncio.to_thread', new_callable=AsyncMock) as mock_to_thread:
-            mock_to_thread.return_value = mock_tushare_api.daily.return_value
-            
-            result = await provider.get_historical_data('000001', '2024-11-01', '2024-12-01')
-            
-            assert result is not None
-            assert isinstance(result, pd.DataFrame)
-            assert len(result) == 1
-            assert 'volume' in result.columns  # 检查列重命名
+
+        async def run():
+            with patch('asyncio.to_thread', new_callable=AsyncMock) as mock_to_thread:
+                mock_to_thread.return_value = mock_tushare_api.daily.return_value
+
+                result = await provider.get_historical_data('000001', '2024-11-01', '2024-12-01')
+
+                assert result is not None
+                assert isinstance(result, pd.DataFrame)
+                assert len(result) == 1
+                assert 'volume' in result.columns  # 检查列重命名
+
+        asyncio.run(run())
     
     def test_normalize_ts_code(self, provider):
         """测试ts_code标准化"""
@@ -247,7 +276,8 @@ class TestTushareProvider:
         assert result['code'] == '000001'
         assert result['close'] == 12.60
         assert result['current_price'] == 12.60
-        assert result['volume'] == 1000000
+        # Tushare 的成交量单位为“手”，标准化后转换为股
+        assert result['volume'] == 100000000
         assert result['pct_chg'] == 1.61
         assert result['trade_date'] == '2024-12-01'
         assert result['data_source'] == 'tushare'

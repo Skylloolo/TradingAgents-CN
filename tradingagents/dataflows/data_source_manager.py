@@ -1503,17 +1503,14 @@ class DataSourceManager:
         # 首先尝试当前数据源
         try:
             if self.current_source == ChinaDataSource.TUSHARE:
-                from .interface import get_china_stock_info_tushare
-                info_str = get_china_stock_info_tushare(symbol)
-                result = self._parse_stock_info_string(info_str, symbol)
+                result = self._get_tushare_stock_info(symbol)
 
-                # 检查是否获取到有效信息
                 if result.get('name') and result['name'] != f'股票{symbol}':
                     logger.info(f"✅ [数据来源: Tushare-股票信息] 成功获取: {symbol}")
                     return result
-                else:
-                    logger.warning(f"⚠️ [数据来源: Tushare失败] 返回无效信息，尝试降级: {symbol}")
-                    return self._try_fallback_stock_info(symbol)
+
+                logger.warning(f"⚠️ [数据来源: Tushare失败] 返回无效信息，尝试降级: {symbol}")
+                return self._try_fallback_stock_info(symbol)
             else:
                 adapter = self.get_data_adapter()
                 if adapter and hasattr(adapter, 'get_stock_info'):
@@ -1592,6 +1589,39 @@ class DataSourceManager:
         except Exception as e:
             logger.error(f"❌ 获取股票数据失败: {e}")
             return f"❌ 获取股票数据失败: {str(e)}\n\n💡 建议：\n1. 检查网络连接\n2. 确认股票代码格式正确\n3. 检查数据源配置"
+
+    def _get_tushare_stock_info(self, symbol: str) -> Dict:
+        """使用Tushare获取股票基础信息"""
+        provider = self._get_tushare_adapter()
+        if not provider:
+            return {'symbol': symbol, 'name': f'股票{symbol}', 'source': 'tushare'}
+
+        import asyncio
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        try:
+            result = loop.run_until_complete(provider.get_stock_basic_info(symbol))
+        except Exception as e:
+            logger.error(f"❌ [股票信息] Tushare获取失败: {symbol}, 错误: {e}")
+            return {'symbol': symbol, 'name': f'股票{symbol}', 'source': 'tushare', 'error': str(e)}
+
+        if isinstance(result, list):
+            result = result[0] if result else None
+
+        if isinstance(result, dict):
+            result.setdefault('symbol', symbol)
+            result.setdefault('source', result.get('data_source', 'tushare'))
+            return result
+
+        return {'symbol': symbol, 'name': f'股票{symbol}', 'source': 'tushare'}
 
     def _try_fallback_stock_info(self, symbol: str) -> Dict:
         """尝试使用备用数据源获取股票基本信息"""
