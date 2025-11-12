@@ -23,9 +23,10 @@ def _safe_float(x) -> Optional[float]:
 
 def _get_tushare_snapshot(symbol: str) -> Dict[str, Optional[float]]:
     try:
-        from .providers.china.tushare import get_tushare_provider
+        from .tushare import get_tushare_provider
         provider = get_tushare_provider()
         if not getattr(provider, 'connected', False):
+            logger.warning('[fund_snapshot] tushare provider not connected, skip snapshot retrieval')
             return {}
         # 先取 ts_code
         info = provider.get_stock_info(symbol)
