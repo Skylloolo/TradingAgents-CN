@@ -1480,6 +1480,8 @@ class TushareProvider(BaseStockDataProvider):
                 "roa2": self._safe_float(latest_indicator.get('roa2')),  # 总资产收益率(扣除非经常损益)
                 "gross_margin": self._safe_float(latest_indicator.get('grossprofit_margin')),  # 🔥 修复：使用 grossprofit_margin（销售毛利率%）而不是 gross_margin（毛利绝对值）
                 "netprofit_margin": self._safe_float(latest_indicator.get('netprofit_margin')),  # 销售净利率
+                "netprofit_yoy": self._safe_float(latest_indicator.get('netprofit_yoy')),  # 净利润同比增长率
+                "epsg": self._safe_float(latest_indicator.get('epsg') or latest_indicator.get('eps_yoy')),  # 每股收益增长率
                 "cogs_of_sales": self._safe_float(latest_indicator.get('cogs_of_sales')),  # 销售成本率
                 "expense_of_sales": self._safe_float(latest_indicator.get('expense_of_sales')),  # 销售期间费用率
                 "profit_to_gr": self._safe_float(latest_indicator.get('profit_to_gr')),  # 净利润/营业总收入
@@ -1649,6 +1651,7 @@ class TushareProvider(BaseStockDataProvider):
                 if not value or value.lower() in ['nan', 'null', 'none', '--', '']:
                     return None
                 # 移除可能的单位符号
+                value = value.replace('%', '').replace('％', '')
                 value = value.replace(',', '').replace('万', '').replace('亿', '')
 
             # 处理数值类型
