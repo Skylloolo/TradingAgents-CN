@@ -4,6 +4,7 @@
 """
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime, date, timedelta
+from threading import Lock
 import pandas as pd
 import asyncio
 import logging
@@ -33,6 +34,10 @@ class TushareProvider(BaseStockDataProvider):
         self.api = None
         self.config = get_provider_config("tushare")
         self.token_source = None  # 记录 Token 来源: 'database' 或 'env'
+        self._bulk_basic_info_mode = False
+        self._daily_basic_cache: Dict[str, Dict[str, Any]] = {}
+        self._daily_basic_cache_ttl = timedelta(minutes=30)
+        self._daily_basic_cache_lock = Lock()
 
         if not TUSHARE_AVAILABLE:
             self.logger.error("❌ Tushare库未安装，请运行: pip install tushare")
@@ -305,19 +310,23 @@ class TushareProvider(BaseStockDataProvider):
             
             # 获取数据
             df = await asyncio.to_thread(self.api.stock_basic, **params)
-            
+
             if df is None or df.empty:
                 return None
-            
+
             # 转换为标准格式
             stock_list = []
-            for _, row in df.iterrows():
-                stock_info = self.standardize_basic_info(row.to_dict())
-                stock_list.append(stock_info)
-            
+            self._bulk_basic_info_mode = True
+            try:
+                for _, row in df.iterrows():
+                    stock_info = self.standardize_basic_info(row.to_dict())
+                    stock_list.append(stock_info)
+            finally:
+                self._bulk_basic_info_mode = False
+
             self.logger.info(f"✅ 获取股票列表: {len(stock_list)}只")
             return stock_list
-            
+
         except Exception as e:
             self.logger.error(f"❌ 获取股票列表失败: {e}")
             return None
@@ -1136,12 +1145,101 @@ class TushareProvider(BaseStockDataProvider):
 
     # ==================== 数据标准化方法 ====================
 
+    def _get_daily_basic_snapshot(self, ts_code: str) -> Optional[Dict[str, Any]]:
+        """获取并缓存 daily_basic 快照"""
+        if not ts_code or not self.api:
+            return None
+
+        now = datetime.utcnow()
+        cached = self._daily_basic_cache.get(ts_code)
+        if cached:
+            cached_age = now - cached.get("timestamp", now)
+            if cached_age <= self._daily_basic_cache_ttl:
+                return cached.get("data")
+
+        fields = (
+            "ts_code,trade_date,total_share,float_share,total_mv,circ_mv,pe,pe_ttm,pb,ps,ps_ttm,"
+            "dv_ratio,dv_ttm,turnover_rate,volume_ratio"
+        )
+
+        with self._daily_basic_cache_lock:
+            # 双重检查，防止重复请求
+            cached = self._daily_basic_cache.get(ts_code)
+            if cached:
+                cached_age = now - cached.get("timestamp", now)
+                if cached_age <= self._daily_basic_cache_ttl:
+                    return cached.get("data")
+
+            try:
+                df = self.api.daily_basic(ts_code=ts_code, limit=1, fields=fields)
+                if df is not None and not df.empty:
+                    record = df.iloc[0].to_dict()
+                    self._daily_basic_cache[ts_code] = {"data": record, "timestamp": now}
+                    return record
+            except Exception as exc:
+                self.logger.warning(
+                    "⚠️ 获取daily_basic失败: ts_code=%s, 错误=%s", ts_code, exc
+                )
+                if cached:
+                    return cached.get("data")
+
+        return cached.get("data") if cached else None
+
+    def _enrich_basic_info_with_daily_basic(self, ts_code: str, info: Dict[str, Any]) -> Dict[str, Any]:
+        """将 daily_basic 字段合并到基础信息中"""
+        if self._bulk_basic_info_mode:
+            return info
+
+        snapshot = self._get_daily_basic_snapshot(ts_code)
+        if not snapshot:
+            return info
+
+        def safe_float(key: str) -> Optional[float]:
+            return self._safe_float(snapshot.get(key))
+
+        total_share = safe_float("total_share")
+        float_share = safe_float("float_share")
+        total_mv_wan = safe_float("total_mv")
+        circ_mv_wan = safe_float("circ_mv")
+        total_mv_yi = total_mv_wan / 10000 if total_mv_wan is not None else None
+        circ_mv_yi = circ_mv_wan / 10000 if circ_mv_wan is not None else None
+
+        enriched = {**info}
+        enriched["daily_basic_trade_date"] = self._format_date_output(snapshot.get("trade_date"))
+        if total_share is not None:
+            enriched["total_share"] = total_share
+        if float_share is not None:
+            enriched["float_share"] = float_share
+        if total_mv_yi is not None:
+            enriched["total_mv"] = total_mv_yi
+        if total_mv_wan is not None:
+            enriched["total_mv_raw_wan"] = total_mv_wan
+        if circ_mv_yi is not None:
+            enriched["circ_mv"] = circ_mv_yi
+        if circ_mv_wan is not None:
+            enriched["circ_mv_raw_wan"] = circ_mv_wan
+
+        key_mapping = {
+            "dividend_ratio": "dv_ratio",
+            "dividend_ttm": "dv_ttm"
+        }
+        for key in ("pe", "pe_ttm", "pb", "ps", "ps_ttm", "dividend_ratio", "dividend_ttm", "volume_ratio"):
+            value = safe_float(key_mapping.get(key, key))
+            if value is not None:
+                enriched[key] = value
+
+        turnover_rate = safe_float("turnover_rate")
+        if turnover_rate is not None:
+            enriched["turnover_rate"] = turnover_rate
+
+        return enriched
+
     def standardize_basic_info(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """标准化股票基础信息"""
         ts_code = raw_data.get('ts_code', '')
         symbol = raw_data.get('symbol', ts_code.split('.')[0] if '.' in ts_code else ts_code)
 
-        return {
+        standardized = {
             # 基础字段
             "code": symbol,
             "name": raw_data.get('name', ''),
@@ -1169,6 +1267,8 @@ class TushareProvider(BaseStockDataProvider):
             "data_version": 1,
             "updated_at": datetime.utcnow()
         }
+
+        return self._enrich_basic_info_with_daily_basic(ts_code, standardized)
 
     def standardize_quotes(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """标准化实时行情数据"""

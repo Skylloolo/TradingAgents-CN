@@ -1728,6 +1728,34 @@ class OptimizedChinaDataProvider:
             logger.error(f"❌ AKShare财务数据解析失败: {e}")
             return None
 
+    def _safe_to_float(self, value) -> Optional[float]:
+        """安全转换为浮点数，兼容包含单位的字符串"""
+        if value is None:
+            return None
+
+        if isinstance(value, (int, float)):
+            if isinstance(value, float) and value != value:
+                return None
+            return float(value)
+
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned or cleaned.lower() in {'nan', 'none', 'null', '--', 'n/a'}:
+                return None
+
+            for token in [',', '亿元', '亿', '万股', '万', '股', '倍', '%', '元']:
+                cleaned = cleaned.replace(token, '')
+
+            if not cleaned:
+                return None
+
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
+
+        return None
+
     def _parse_financial_data(self, financial_data: dict, stock_info: dict, price_value: float) -> dict:
         """解析财务数据为指标"""
         try:
@@ -1806,20 +1834,50 @@ class OptimizedChinaDataProvider:
             revenue_type = "TTM" if ttm_revenue else "单期"
             profit_type = "TTM" if ttm_net_income else "单期"
 
-            # 获取实际总股本计算市值
-            # 优先从 stock_info 获取，如果没有则无法计算准确的估值指标
-            total_share = stock_info.get('total_share') if stock_info else None
+            # 获取估值相关字段
+            total_share = self._safe_to_float(stock_info.get('total_share')) if stock_info else None
+            float_share = self._safe_to_float(stock_info.get('float_share')) if stock_info else None
+            total_mv_info = self._safe_to_float(stock_info.get('total_mv')) if stock_info else None
+            total_mv_raw_wan = self._safe_to_float(stock_info.get('total_mv_raw_wan')) if stock_info else None
+            circ_mv_info = self._safe_to_float(stock_info.get('circ_mv')) if stock_info else None
+            pe_info = self._safe_to_float(stock_info.get('pe')) if stock_info else None
+            pb_info = self._safe_to_float(stock_info.get('pb')) if stock_info else None
+            ps_info = self._safe_to_float(stock_info.get('ps')) if stock_info else None
 
-            if total_share and total_share > 0:
-                # 市值（元）= 股价（元）× 总股本（万股）× 10000
+            market_cap = None
+            market_cap_yi = None
+
+            if total_share and total_share > 0 and price_value:
                 market_cap = price_value * total_share * 10000
-                market_cap_yi = market_cap / 100000000  # 转换为亿元
+                market_cap_yi = market_cap / 100000000
+                logger.info(
+                    f"✅ [Tushare-总市值计算成功] 总市值={market_cap_yi:.2f}亿元 (股价{price_value}元 × 总股本{total_share}万股)"
+                )
+            elif total_mv_info and total_mv_info > 0:
+                market_cap_yi = total_mv_info
+                market_cap = market_cap_yi * 100000000
+                logger.info(
+                    f"✅ [Tushare-总市值使用缓存] 使用 stock_info.total_mv={total_mv_info:.2f}亿元"
+                )
+            elif total_mv_raw_wan and total_mv_raw_wan > 0:
+                market_cap = total_mv_raw_wan * 10000
+                market_cap_yi = market_cap / 100000000
+                logger.info(
+                    f"✅ [Tushare-总市值使用原始万] total_mv_raw_wan={total_mv_raw_wan:.2f}万 → {market_cap_yi:.2f}亿元"
+                )
+
+            if market_cap_yi is not None:
                 metrics["total_mv"] = f"{market_cap_yi:.2f}亿元"
-                logger.info(f"✅ [Tushare-总市值计算成功] 总市值={market_cap_yi:.2f}亿元 (股价{price_value}元 × 总股本{total_share}万股)")
             else:
-                logger.error(f"❌ {stock_info.get('code', 'Unknown')} 无法获取总股本，无法计算准确的估值指标")
-                market_cap = None
                 metrics["total_mv"] = "N/A"
+                logger.warning(
+                    f"⚠️ {stock_info.get('code', 'Unknown')} 缺少总股本或市值数据，估值将降级"
+                )
+
+            if circ_mv_info is not None and circ_mv_info > 0:
+                metrics.setdefault("circ_mv", f"{circ_mv_info:.2f}亿元")
+            if float_share is not None and float_share > 0:
+                metrics.setdefault("float_share", f"{float_share:.0f}万股")
 
             # 计算各项指标（只有在有准确市值时才计算）
             if market_cap:
@@ -1831,26 +1889,20 @@ class OptimizedChinaDataProvider:
                     logger.info(f"✅ Tushare 计算PE({profit_type}): 市值{market_cap/100000000:.2f}亿元 / 净利润{net_income:.2f}万元 = {pe_ratio:.1f}倍")
                 else:
                     metrics["pe"] = "N/A（亏损）"
-
-                # PB比率（净资产使用最新期数据，相对准确）
-                if total_equity > 0:
-                    pb_ratio = market_cap / (total_equity * 10000)
-                    metrics["pb"] = f"{pb_ratio:.2f}倍"
+                elif market_cap is None:
+                    metrics["pe"] = "N/A（无总股本数据）"
                 else:
-                    metrics["pb"] = "N/A"
+                    metrics["pe"] = "N/A"
 
-                # PS比率（优先使用 TTM 营业收入）
-                if total_revenue > 0:
-                    ps_ratio = market_cap / (total_revenue * 10000)
-                    metrics["ps"] = f"{ps_ratio:.1f}倍"
-                    logger.info(f"✅ Tushare 计算PS({revenue_type}): 市值{market_cap/100000000:.2f}亿元 / 营业收入{total_revenue:.2f}万元 = {ps_ratio:.1f}倍")
-                else:
-                    metrics["ps"] = "N/A"
+            if pb_ratio is not None:
+                metrics["pb"] = f"{pb_ratio:.2f}倍"
             else:
-                # 无法获取总股本，无法计算估值指标
-                metrics["pe"] = "N/A（无总股本数据）"
-                metrics["pb"] = "N/A（无总股本数据）"
-                metrics["ps"] = "N/A（无总股本数据）"
+                metrics["pb"] = "N/A（无总股本数据）" if market_cap is None else "N/A"
+
+            if ps_ratio is not None:
+                metrics["ps"] = f"{ps_ratio:.1f}倍"
+            else:
+                metrics["ps"] = "N/A（无总股本数据）" if market_cap is None else "N/A"
 
             growth_rate = extract_growth_rate(financial_data, raw_indicator_latest, stock_info)
             if pe_numeric is not None and pe_numeric > 0 and growth_rate and growth_rate > 0:
